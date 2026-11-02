@@ -1,6 +1,8 @@
 import datetime
+import hashlib
 import os
 import random
+import re
 import time
 import zoneinfo
 import requests
@@ -9,7 +11,20 @@ from playwright.sync_api import sync_playwright
 URL = "https://www.stwdo.de/wohnen/aktuelle-wohnangebote"
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-KEYWORDS = ["einzelapartment", "einzelapartments", "apartment", "wohnangebote"]
+
+# Tekli, ikili/üçlü WG ve genel daire anahtar kelimeleri
+KEYWORDS = [
+    "einzelapartment",
+    "einzelapartments",
+    "wg",
+    "wg-zimmer",
+    "wohngemeinschaft",
+    "dublette",
+    "apartments",
+    "zimmer",
+]
+
+CACHE_FILE = "seen_offers.txt"
 
 
 def notify(msg):
@@ -29,9 +44,15 @@ def notify(msg):
 
 
 def is_in_active_window():
+    """Almanya (Berlin) saat dilimine göre izin verilen zaman pencereleri:
+
+    - Pazartesi 10:00 -> Salı 12:00
+    - Çarşamba 10:00 -> Perşembe 12:00
+    """
     tz = zoneinfo.ZoneInfo("Europe/Berlin")
     now = datetime.datetime.now(tz)
-    weekday = now.weekday()
+
+    weekday = now.weekday()  # 0: Pazartesi, 1: Salı, 2: Çarşamba, 3: Perşembe
     hour = now.hour
 
     if weekday == 0 and hour >= 10:
@@ -46,11 +67,39 @@ def is_in_active_window():
     return False
 
 
+def load_seen_hashes():
+    """Daha önce bildirilen ilanların hash değerlerini okur."""
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            return set(line.strip() for line in f if line.strip())
+    return set()
+
+
+def save_seen_hashes(hashes):
+    """Görülen ilanların hash değerlerini dosyaya kaydeder."""
+    with open(CACHE_FILE, "a", encoding="utf-8") as f:
+        for h in hashes:
+            f.write(f"{h}\n")
+
+
+def normalize_line_for_hash(line):
+    """Rakamları ve değişen kontenjan sayılarını temizleyip ilanın sabit
+
+    kimliğini çıkartır.
+    """
+    # Tüm sayıları temizle (örneğin '8 verfügbare' ile '7 verfügbare' aynı kabul edilir)
+    clean = re.sub(r"\d+", "", line.lower())
+    # Fazla boşlukları ve özel karakterleri temizle
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean
+
+
 def check_offers():
     if not is_in_active_window():
         print("⏰ Şu an aktif izleme saatleri dışında. İşlem atlanıyor.")
         return
 
+    # 120 - 300 saniye (2-5 dakika) rastgele bekleme
     wait_seconds = random.randint(120, 300)
     print(
         f"🎲 Aktif zaman penceresindeyiz. Sayfa kontrolünden önce {wait_seconds} saniye ({round(wait_seconds/60, 1)} dk) bekleniyor..."
@@ -80,7 +129,7 @@ def check_offers():
             page.goto(URL, wait_until="domcontentloaded", timeout=60000)
             time.sleep(5)
 
-            # Çerez (Cookie) Onay Kutusu Varsa Tıkla
+            # Çerez (Cookie) Onay Kutusu
             cookie_selectors = [
                 "button:has-text('Akzeptieren')",
                 "button:has-text('Alle akzeptieren')",
@@ -98,47 +147,48 @@ def check_offers():
                 except Exception:
                     pass
 
-            # Mosparo / Spam Kontrolü Tıklaması
-            spam_selector = "text=Ich akzeptiere"
-            try:
-                if page.is_visible(spam_selector, timeout=3000):
-                    page.click(spam_selector)
-                    print("🛡️ Mosparo anti-spam kontrolü tıklandı.")
-                    time.sleep(5)
-            except Exception:
-                pass
-
-            # Sayfayı aşağı kaydırarak dinamik öğelerin yüklenmesini tetikle
+            # Sayfayı aşağı kaydır
             page.mouse.wheel(0, 1000)
             time.sleep(3)
 
             body_text = page.inner_text("body")
             print(f"📄 Sayfa metni çekildi. Karakter sayısı: {len(body_text)}")
 
-            # Aranan kelimeleri kontrol et
-            found_kw = [kw for kw in KEYWORDS if kw in body_text.lower()]
+            seen_hashes = load_seen_hashes()
+            new_offers = []
+            new_hashes = set()
 
-            if found_kw:
-                print(f"✅ Yakalanan kelimeler: {found_kw}")
+            for line in body_text.splitlines():
+                clean_line = line.strip()
+                # Kelimelerden herhangi biri geçiyor mu ve satır anlamlı bir uzunlukta mı?
+                if (
+                    any(kw in clean_line.lower() for kw in KEYWORDS)
+                    and len(clean_line) > 8
+                ):
+                    # Rakamları temizleyip sadece mekan/ilan kimliğini hash'le
+                    normalized = normalize_line_for_hash(clean_line)
+                    offer_hash = hashlib.md5(
+                        normalized.encode("utf-8")
+                    ).hexdigest()
 
-                matched_lines = []
-                for line in body_text.splitlines():
-                    if (
-                        any(kw in line.lower() for kw in KEYWORDS)
-                        and line.strip()
-                    ):
-                        # Çok genel/kısa başlıkları filtrele
-                        if len(line.strip()) > 5:
-                            matched_lines.append(line.strip())
+                    if offer_hash not in seen_hashes:
+                        new_offers.append(clean_line)
+                        new_hashes.add(offer_hash)
+
+            if new_offers:
+                print(
+                    f"🔥 {len(new_offers)} Adet YENİ İlan (Einzel/WG) Bulundu!"
+                )
 
                 msg = f"🏠 YENİ İLAN BULUNDU!\n\n"
-                msg += "\n• ".join(matched_lines[:8])
+                msg += "\n• ".join(new_offers[:8])
                 msg += f"\n\n🔗 Link: {URL}"
 
                 notify(msg)
+                save_seen_hashes(new_hashes)
             else:
                 print(
-                    f"❌ Sayfada {KEYWORDS} kelimelerinden hiçbiri bulunamadı."
+                    "ℹ️ Yeni lokasyon/ilan yok. Sitedeki mevcut ilanlar (kontenjan değişmiş olsa bile) önceden bildirildi."
                 )
 
         except Exception as e:
