@@ -4,7 +4,7 @@ import random
 import time
 import zoneinfo
 import requests
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 URL = "https://www.stwdo.de/wohnen/aktuelle-wohnangebote"
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -13,34 +13,38 @@ KEYWORD = "einzelapartment"
 
 
 def notify(msg):
-    print(f"📢 Telegram'a gönderiliyor: {msg}")
     if not TOKEN or not CHAT_ID:
-        print("❌ HATA: TELEGRAM_TOKEN veya TELEGRAM_CHAT_ID eksik!")
+        print("Telegram konfigürasyonu eksik!")
         return
     try:
-        res = requests.post(
+        requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
             data={"chat_id": CHAT_ID, "text": msg},
             timeout=15,
         )
-        print("Telegram Yanıtı:", res.json())
     except Exception as e:
         print("Telegram hatası:", e)
 
 
 def is_in_active_window():
+    """Almanya (Berlin) saat dilimine göre izin verilen zaman pencereleri:
+
+    - Pazartesi 10:00 -> Salı 12:00
+    - Çarşamba 10:00 -> Perşembe 12:00
+    """
     tz = zoneinfo.ZoneInfo("Europe/Berlin")
     now = datetime.datetime.now(tz)
-    weekday = now.weekday()  # 0: Pzt, 1: Salı, 2: Çar, 3: Per
+
+    weekday = now.weekday()  # 0: Pazartesi, 1: Salı, 2: Çarşamba, 3: Perşembe
     hour = now.hour
 
-    # Pazartesi 10:00 -> Salı 12:00
+    # Pazartesi 10:00 - Salı 12:00
     if weekday == 0 and hour >= 10:
         return True
     if weekday == 1 and hour < 12:
         return True
 
-    # Çarşamba 10:00 -> Perşembe 12:00
+    # Çarşamba 10:00 - Perşembe 12:00
     if weekday == 2 and hour >= 10:
         return True
     if weekday == 3 and hour < 12:
@@ -50,62 +54,55 @@ def is_in_active_window():
 
 
 def check_offers():
-    print(
-        f"🕒 Şu anki Almanya Saati: {datetime.datetime.now(zoneinfo.ZoneInfo('Europe/Berlin')).strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-
     if not is_in_active_window():
-        print("⏰ Aktif izleme saatleri dışındayız!")
-        # Test için bildirimi yine de gönderelim
-        notify("⚠️ TEST: Bot çalıştı ama zaman penceresi dışında.")
+        print("⏰ Şu an aktif izleme saatleri dışında. İşlem atlanıyor.")
         return
 
-    # Test amacıyla bekleme süresini 5 saniyeye düşürdük
-    print("🎲 5 saniye bekleniyor...")
-    time.sleep(5)
+    # 120 - 300 saniye (2-5 dakika) rastgele bekleme
+    wait_seconds = random.randint(120, 300)
+    print(
+        f"🎲 Aktif zaman penceresindeyiz. Sayfa kontrolünden önce {wait_seconds} saniye ({round(wait_seconds/60, 1)} dk) bekleniyor..."
+    )
+    time.sleep(wait_seconds)
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8",
-    }
+    print("🚀 Playwright tarayıcısı başlatılıyor...")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            locale="de-DE",
+        )
+        page = context.new_page()
 
-    try:
-        print("🔎 Sayfa taranıyor...")
-        response = requests.get(URL, headers=headers, timeout=30)
-        print(f"HTTP Durum Kodu: {response.status_code}")
+        try:
+            print("🔎 Sayfaya gidiliyor...")
+            page.goto(URL, wait_until="networkidle", timeout=60000)
+            time.sleep(3)  # JS içeriklerinin tam oturması için ek bekleme
 
-        soup = BeautifulSoup(response.text, "html.parser")
-        body_text = soup.get_text()
+            body_text = page.inner_text("body")
+            print(f"📄 Sayfa başarıyla yüklendi. (Metin uzunluğu: {len(body_text)})")
 
-        print(f"Sayfadaki toplam karakter sayısı: {len(body_text)}")
+            if KEYWORD in body_text.lower():
+                print(f"✅ '{KEYWORD}' kelimesi sayfada yakalandı!")
 
-        # Aradığımız kelime var mı?
-        if KEYWORD in body_text.lower():
-            print(f"✅ '{KEYWORD}' kelimesi sayfada bulundu!")
+                found_lines = []
+                for line in body_text.splitlines():
+                    if KEYWORD in line.lower() and line.strip():
+                        found_lines.append(line.strip())
 
-            # Kelimenin geçtiği satırları yakala
-            found_lines = []
-            for line in body_text.splitlines():
-                if KEYWORD in line.lower() and line.strip():
-                    found_lines.append(line.strip())
+                # İlan metinlerini derle
+                msg = f"🏠 YENİ İLAN BULUNDU!\n\n"
+                msg += "\n• ".join(found_lines[:5])
+                msg += f"\n\n🔗 Link: {URL}"
 
-            msg = f"🏠 YENİ İLAN BULUNDU!\n\n"
-            msg += "\n".join(found_lines[:5])
-            msg += f"\n\n🔗 {URL}"
-            notify(msg)
-        else:
-            print(
-                f"❌ '{KEYWORD}' kelimesi sayfa metninde bulunamadı. (Sayfa engellenmiş veya JS ile yükleniyor olabilir)"
-            )
-            # Test mesajı atalım
-            notify(
-                f"ℹ️ Bot sayfayı taradı ama '{KEYWORD}' kelimesini bulamadı."
-            )
+                notify(msg)
+            else:
+                print(f"❌ İlan metninde '{KEYWORD}' bulunamadı.")
 
-    except Exception as e:
-        print("Hata oluştu:", e)
-        notify(f"❌ Bot çalıştırma hatası: {e}")
+        except Exception as e:
+            print("Tarama hatası oluştu:", e)
+        finally:
+            browser.close()
 
 
 if __name__ == "__main__":
