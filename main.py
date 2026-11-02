@@ -1,5 +1,4 @@
 import datetime
-import hashlib
 import os
 import random
 import time
@@ -10,42 +9,38 @@ from bs4 import BeautifulSoup
 URL = "https://www.stwdo.de/wohnen/aktuelle-wohnangebote"
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-KEYWORD = "einzelapartment"  # Küçük harfle arama yapılır
+KEYWORD = "einzelapartment"
 
 
 def notify(msg):
+    print(f"📢 Telegram'a gönderiliyor: {msg}")
     if not TOKEN or not CHAT_ID:
-        print("Telegram konfigürasyonu eksik!")
+        print("❌ HATA: TELEGRAM_TOKEN veya TELEGRAM_CHAT_ID eksik!")
         return
     try:
-        requests.post(
+        res = requests.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
             data={"chat_id": CHAT_ID, "text": msg},
             timeout=15,
         )
+        print("Telegram Yanıtı:", res.json())
     except Exception as e:
         print("Telegram hatası:", e)
 
 
 def is_in_active_window():
-    """Almanya (Berlin) saat dilimine göre izin verilen zaman pencerelerini kontrol eder:
-
-    - Pazartesi 10:00 -> Salı 12:00
-    - Çarşamba 10:00 -> Perşembe 12:00
-    """
     tz = zoneinfo.ZoneInfo("Europe/Berlin")
     now = datetime.datetime.now(tz)
-
-    weekday = now.weekday()  # 0: Pazartesi, 1: Salı, 2: Çarşamba, 3: Perşembe
+    weekday = now.weekday()  # 0: Pzt, 1: Salı, 2: Çar, 3: Per
     hour = now.hour
 
-    # Pazartesi 10:00 - Salı 12:00
+    # Pazartesi 10:00 -> Salı 12:00
     if weekday == 0 and hour >= 10:
         return True
     if weekday == 1 and hour < 12:
         return True
 
-    # Çarşamba 10:00 - Perşembe 12:00
+    # Çarşamba 10:00 -> Perşembe 12:00
     if weekday == 2 and hour >= 10:
         return True
     if weekday == 3 and hour < 12:
@@ -55,68 +50,62 @@ def is_in_active_window():
 
 
 def check_offers():
+    print(
+        f"🕒 Şu anki Almanya Saati: {datetime.datetime.now(zoneinfo.ZoneInfo('Europe/Berlin')).strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
     if not is_in_active_window():
-        print("⏰ Şu an aktif izleme saatleri dışında. İşlem atlanıyor.")
+        print("⏰ Aktif izleme saatleri dışındayız!")
+        # Test için bildirimi yine de gönderelim
+        notify("⚠️ TEST: Bot çalıştı ama zaman penceresi dışında.")
         return
 
-    # 120 ile 300 saniye (2 - 5 dakika) arasında rastgele bekle
-    wait_seconds = random.randint(120, 300)
-    print(
-        f"🎲 Aktif zaman penceresindeyiz. Sayfa kontrolünden önce {wait_seconds} saniye ({round(wait_seconds/60, 1)} dk) bekleniyor..."
-    )
-    time.sleep(wait_seconds)
+    # Test amacıyla bekleme süresini 5 saniyeye düşürdük
+    print("🎲 5 saniye bekleniyor...")
+    time.sleep(5)
 
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8",
     }
 
     try:
         print("🔎 Sayfa taranıyor...")
         response = requests.get(URL, headers=headers, timeout=30)
-        if response.status_code != 200:
-            print(f"Siteye erişilemedi, Durum Kodu: {response.status_code}")
-            return
+        print(f"HTTP Durum Kodu: {response.status_code}")
 
         soup = BeautifulSoup(response.text, "html.parser")
+        body_text = soup.get_text()
 
-        # HTML içerisindeki tüm blok elemanlarını veya paragraf gruplarını tara
-        found_offers = []
+        print(f"Sayfadaki toplam karakter sayısı: {len(body_text)}")
 
-        # Sayfadaki tüm metin bloklarını kontrol et
-        for element in soup.find_all(
-            ["div", "article", "section", "li", "tr", "p"]
-        ):
-            text = element.get_text(separator=" ", strip=True)
-            # Eğer kelime blok içinde geçiyorsa ve metin çok uzun/genel değilse kapsa
-            if KEYWORD in text.lower() and len(text) < 500:
-                if text not in found_offers:
-                    found_offers.append(text)
+        # Aradığımız kelime var mı?
+        if KEYWORD in body_text.lower():
+            print(f"✅ '{KEYWORD}' kelimesi sayfada bulundu!")
 
-        # Eğer blok bulunamadıysa fallback olarak tüm sayfa satırlarında ara
-        if not found_offers:
-            body_text = soup.get_text()
+            # Kelimenin geçtiği satırları yakala
+            found_lines = []
             for line in body_text.splitlines():
                 if KEYWORD in line.lower() and line.strip():
-                    found_offers.append(line.strip())
+                    found_lines.append(line.strip())
 
-        print(f"Bulunan {KEYWORD} sayısı: {len(found_offers)}")
-
-        if found_offers:
-            # Bulunan ilan bilgilerini derle
-            message_text = "🏠 YENİ İLAN BULUNDU!\n\n"
-            for idx, offer in enumerate(found_offers[:3], 1):
-                message_text += f"📌 İlan {idx}:\n{offer}\n\n"
-
-            message_text += f"🔗 Link: {URL}"
-            notify(message_text)
+            msg = f"🏠 YENİ İLAN BULUNDU!\n\n"
+            msg += "\n".join(found_lines[:5])
+            msg += f"\n\n🔗 {URL}"
+            notify(msg)
+        else:
+            print(
+                f"❌ '{KEYWORD}' kelimesi sayfa metninde bulunamadı. (Sayfa engellenmiş veya JS ile yükleniyor olabilir)"
+            )
+            # Test mesajı atalım
+            notify(
+                f"ℹ️ Bot sayfayı taradı ama '{KEYWORD}' kelimesini bulamadı."
+            )
 
     except Exception as e:
         print("Hata oluştu:", e)
+        notify(f"❌ Bot çalıştırma hatası: {e}")
 
 
 if __name__ == "__main__":
