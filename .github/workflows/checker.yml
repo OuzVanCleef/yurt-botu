@@ -2,8 +2,8 @@ name: Yurt İlan Kontrolcüsü
 
 on:
   schedule:
-    # Pazartesi - Perşembe günleri otomatik çalışır
-    - cron: '*/7 * * * 1,2,3,4'
+    # Her gün her 10 dakikada bir çalış (Gün kısıtlamasını Python kodu hallediyor)
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -25,7 +25,6 @@ jobs:
         pip install -r requirements.txt
         playwright install chromium --with-deps
 
-    # Görülen ilanların hatırlanması için hafıza/cache adımı
     - name: İlan Önbelleğini Yükle
       uses: actions/cache@v4
       with:
