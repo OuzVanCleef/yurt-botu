@@ -2,6 +2,7 @@ name: Yurt İlan Kontrolcüsü
 
 on:
   schedule:
+    # Pazartesi - Perşembe günleri otomatik çalışır
     - cron: '*/7 * * * 1,2,3,4'
   workflow_dispatch:
 
@@ -23,6 +24,15 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         playwright install chromium --with-deps
+
+    # Görülen ilanların hatırlanması için hafıza/cache adımı
+    - name: İlan Önbelleğini Yükle
+      uses: actions/cache@v4
+      with:
+        path: seen_offers.txt
+        key: offer-cache-${{ github.run_id }}
+        restore-keys: |
+          offer-cache-
 
     - name: Botu Çalıştır
       env:
