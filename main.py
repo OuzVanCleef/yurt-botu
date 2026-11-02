@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 URL = "https://www.stwdo.de/wohnen/aktuelle-wohnangebote"
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-KEYWORD = "Einzelapartment"
+KEYWORD = "einzelapartment"  # Küçük harfle arama yapılır
 
 
 def notify(msg):
@@ -83,21 +83,37 @@ def check_offers():
             return
 
         soup = BeautifulSoup(response.text, "html.parser")
-        body_text = soup.get_text()
 
-        offers = [
-            line.strip()
-            for line in body_text.splitlines()
-            if KEYWORD.lower() in line.lower() and line.strip()
-        ]
+        # HTML içerisindeki tüm blok elemanlarını veya paragraf gruplarını tara
+        found_offers = []
 
-        print(f"Bulunan {KEYWORD} sayısı: {len(offers)}")
+        # Sayfadaki tüm metin bloklarını kontrol et
+        for element in soup.find_all(
+            ["div", "article", "section", "li", "tr", "p"]
+        ):
+            text = element.get_text(separator=" ", strip=True)
+            # Eğer kelime blok içinde geçiyorsa ve metin çok uzun/genel değilse kapsa
+            if KEYWORD in text.lower() and len(text) < 500:
+                if text not in found_offers:
+                    found_offers.append(text)
 
-        if offers:
-            details = "\n• ".join(offers[:3])
-            notify(
-                f"🏠 YENİ İLAN BULUNDU!\n\nBulunan İlanlar:\n• {details}\n\nLink: {URL}"
-            )
+        # Eğer blok bulunamadıysa fallback olarak tüm sayfa satırlarında ara
+        if not found_offers:
+            body_text = soup.get_text()
+            for line in body_text.splitlines():
+                if KEYWORD in line.lower() and line.strip():
+                    found_offers.append(line.strip())
+
+        print(f"Bulunan {KEYWORD} sayısı: {len(found_offers)}")
+
+        if found_offers:
+            # Bulunan ilan bilgilerini derle
+            message_text = "🏠 YENİ İLAN BULUNDU!\n\n"
+            for idx, offer in enumerate(found_offers[:3], 1):
+                message_text += f"📌 İlan {idx}:\n{offer}\n\n"
+
+            message_text += f"🔗 Link: {URL}"
+            notify(message_text)
 
     except Exception as e:
         print("Hata oluştu:", e)
