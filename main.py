@@ -24,7 +24,7 @@ KEYWORDS = [
     "zimmer",
 ]
 
-CACHE_FILE = "seen_offers.txt"
+CACHE_FILE = "seen_offers_v2.txt"
 
 
 def notify(msg):
