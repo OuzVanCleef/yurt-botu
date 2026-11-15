@@ -57,13 +57,10 @@ def normalize_for_hash(text):
 
 
 def accept_cookies(page):
-    """Standart ve Shadow DOM (Usercentrics) içindeki çerez onay butonlarını geçer."""
-    # 1. Yöntem: Playwright Role & Text Locator (Shadow DOM'u otomatik deler)
     button_names = [
         re.compile(r"alle akzeptieren", re.I),
         re.compile(r"akzeptieren", re.I),
         re.compile(r"zustimmen", re.I),
-        re.compile(r"accept all", re.I),
     ]
     for name in button_names:
         try:
@@ -71,12 +68,11 @@ def accept_cookies(page):
             if btn.is_visible(timeout=2000):
                 btn.click()
                 print(f"🍪 Çerez butonu tıklandı: {name.pattern}")
-                time.sleep(3)
+                time.sleep(2)
                 return
         except Exception:
             pass
 
-    # 2. Yöntem: JavaScript ile Shadow DOM (Usercentrics) doğrudan tıklaması
     try:
         clicked = page.evaluate("""() => {
             const uc = document.querySelector('#usercentrics-root');
@@ -87,10 +83,41 @@ def accept_cookies(page):
             return false;
         }""")
         if clicked:
-            print("🍪 Shadow DOM (Usercentrics) çerez onayı geçildi.")
-            time.sleep(3)
+            print("🍪 Shadow DOM çerez onayı geçildi.")
+            time.sleep(2)
     except Exception:
         pass
+
+
+def pass_mosparo_spam_protection(page):
+    """Mosparo spam koruma kutusunu işaretler ve yönlendirmeyi bekler."""
+    body_text = page.inner_text("body")
+    if "spamschutz" in body_text.lower() or "ich akzeptiere" in body_text.lower():
+        print("🛡️ Mosparo spam koruması tespit edildi, onay veriliyor...")
+        try:
+            # 1. 'Ich akzeptiere' etiketine veya checkbox'a tıkla
+            checkbox_label = page.locator("text=/Ich akzeptiere/i").first
+            if checkbox_label.is_visible(timeout=3000):
+                checkbox_label.click(force=True)
+                print("✅ 'Ich akzeptiere' kutusuna tıklandı.")
+            else:
+                cb = page.locator("input[type='checkbox']").first
+                cb.click(force=True)
+                print("✅ Checkbox işaretlendi.")
+
+            # 2. Doğrulama tamamlanıp sayfa yönlendirilene kadar bekle (maks. 20 sn)
+            print("⏳ Spam doğrulaması ve yönlendirme bekleniyor...")
+            for _ in range(20):
+                time.sleep(1)
+                current_text = page.inner_text("body").lower()
+                if "spamschutz" not in current_text and len(current_text) > 1000:
+                    print("🔓 Spam koruması başarıyla geçildi, ilan sayfası yüklendi!")
+                    time.sleep(2)
+                    return True
+            print("⚠️ Yönlendirme süresi doldu, sayfa tekrar kontrol ediliyor...")
+        except Exception as e:
+            print(f"❌ Spam koruması tıklama hatası: {e}")
+    return False
 
 
 def check_offers():
@@ -126,22 +153,25 @@ def check_offers():
         try:
             print("🔎 Sayfa yükleniyor...")
             page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(5)
+            time.sleep(4)
 
-            # Çerez onay penceresini geç
+            # Çerezleri kabul et
             accept_cookies(page)
 
-            # İçeriğin tam oturması için bekle ve aşağı kaydır
+            # Mosparo spam korumasını geç ve yönlendirmeyi bekle
+            pass_mosparo_spam_protection(page)
+
+            # Sayfanın tamamını yüklemek için kaydır
             page.mouse.wheel(0, 1500)
-            time.sleep(4)
+            time.sleep(3)
 
             body_text = page.inner_text("body")
             print(f"📄 Çekilen toplam karakter sayısı: {len(body_text)}")
 
-            # Eğer karakter sayısı hala 1000'in altındaysa engelleme/bekleme metnini loga yazdır
             if len(body_text) < 1000:
-                print("⚠️ Sayfa içeriği kısa döndü. Ekrandaki metin özeti:")
+                print("⚠️ Uyarı: Sayfa hala spam ekranında veya boş olabilir:")
                 print(body_text[:400])
+                return
 
             seen_hashes = load_seen_hashes()
             new_offers = []
