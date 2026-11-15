@@ -1,30 +1,25 @@
-import datetime
 import hashlib
 import os
 import random
 import re
 import time
-import zoneinfo
 import requests
 from playwright.sync_api import sync_playwright
 
 URL = "https://www.stwdo.de/wohnen/aktuelle-wohnangebote"
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+CACHE_FILE = "seen_offers.txt"
 
-# Tekli, ikili/üçlü WG ve genel daire anahtar kelimeleri
+# Yakalanacak ilan tipleri (Tekli daireler ve 2'li, 3'lü, 5'li vb. WG odaları)
 KEYWORDS = [
     "einzelapartment",
     "einzelapartments",
-    "wg",
+    "er-wg",          # 2er-WG, 3er-WG, 5er-WG gibi tüm varyasyonları yakalar
     "wg-zimmer",
     "wohngemeinschaft",
-    "dublette",
-    "apartments",
-    "zimmer",
+    "dublette"
 ]
-
-CACHE_FILE = "seen_offers_v2.txt"
 
 
 def notify(msg):
@@ -38,37 +33,12 @@ def notify(msg):
             data={"chat_id": CHAT_ID, "text": clean_msg},
             timeout=15,
         )
-        print(f"Telegram Gönderim Yanıtı: {res.status_code}")
+        print(f"Telegram Yanıtı: {res.status_code}")
     except Exception as e:
         print("Telegram hatası:", e)
 
 
-def is_in_active_window():
-    """Almanya (Berlin) saat dilimine göre izin verilen zaman pencereleri:
-
-    - Pazartesi 10:00 -> Salı 12:00
-    - Çarşamba 10:00 -> Perşembe 12:00
-    """
-    tz = zoneinfo.ZoneInfo("Europe/Berlin")
-    now = datetime.datetime.now(tz)
-
-    weekday = now.weekday()  # 0: Pazartesi, 1: Salı, 2: Çarşamba, 3: Perşembe
-    hour = now.hour
-
-    if weekday == 0 and hour >= 10:
-        return True
-    if weekday == 1 and hour < 12:
-        return True
-    if weekday == 2 and hour >= 10:
-        return True
-    if weekday == 3 and hour < 12:
-        return True
-
-    return False
-
-
 def load_seen_hashes():
-    """Daha önce bildirilen ilanların hash değerlerini okur."""
     if os.path.exists(CACHE_FILE):
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             return set(line.strip() for line in f if line.strip())
@@ -76,37 +46,38 @@ def load_seen_hashes():
 
 
 def save_seen_hashes(hashes):
-    """Görülen ilanların hash değerlerini dosyaya kaydeder."""
     with open(CACHE_FILE, "a", encoding="utf-8") as f:
         for h in hashes:
             f.write(f"{h}\n")
 
 
-def normalize_line_for_hash(line):
-    """Rakamları ve değişen kontenjan sayılarını temizleyip ilanın sabit
-
-    kimliğini çıkartır.
+def normalize_for_hash(text):
     """
-    # Tüm sayıları temizle (örneğin '8 verfügbare' ile '7 verfügbare' aynı kabul edilir)
-    clean = re.sub(r"\d+", "", line.lower())
-    # Fazla boşlukları ve özel karakterleri temizle
+    Rakamları ve boş oda sayılarını temizler.
+    Örn: '8 verfügbare Einzelapartments' -> 'verfügbare einzelapartments'
+    Örn: 'Zimmer in 3er-WG' -> 'zimmer in er-wg'
+    Böylece kontenjan 8'den 7'ye düşse bile aynı yurt/tip için tekrar bildirim atmaz.
+    """
+    clean = re.sub(r"\d+", "", text.lower())
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean
 
 
 def check_offers():
-    if not is_in_active_window():
-        print("⏰ Şu an aktif izleme saatleri dışında. İşlem atlanıyor.")
-        return
+    # 1. İlk başlatma / Önbellek silinmişse bildirim gönder
+    is_first_run = not os.path.exists(CACHE_FILE)
+    if is_first_run:
+        print("🚀 İlk çalıştırma veya önbellek temizlendi. Başlangıç mesajı atılıyor...")
+        notify("🤖 Bot başlatıldı ve hafıza sıfırlandı! İlan takibi aktif.")
+        # Dosyayı hemen oluştur ki bir sonraki çalışmada tekrar başlatıldı mesajı atmasın
+        open(CACHE_FILE, "w", encoding="utf-8").close()
 
-    # 120 - 300 saniye (2-5 dakika) rastgele bekleme
-    wait_seconds = random.randint(120, 300)
-    print(
-        f"🎲 Aktif zaman penceresindeyiz. Sayfa kontrolünden önce {wait_seconds} saniye ({round(wait_seconds/60, 1)} dk) bekleniyor..."
-    )
+    # 2. Bot tespitini önlemek için 0 - 180 saniye arası rastgele bekleme
+    wait_seconds = random.randint(0, 180)
+    print(f"🎲 Tarama öncesi {wait_seconds} saniye rastgele bekleniyor...")
     time.sleep(wait_seconds)
 
-    print("🚀 Playwright tarayıcısı stealth modunda başlatılıyor...")
+    print("🌐 Tarayıcı başlatılıyor...")
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -118,18 +89,14 @@ def check_offers():
             viewport={"width": 1280, "height": 800},
         )
         page = context.new_page()
-
-        # Webdriver izini gizle
-        page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         try:
-            print("🔎 Sayfaya gidiliyor...")
+            print("🔎 Sayfa yükleniyor...")
             page.goto(URL, wait_until="domcontentloaded", timeout=60000)
             time.sleep(5)
 
-            # Çerez (Cookie) Onay Kutusu
+            # Çerez onay penceresini geç
             cookie_selectors = [
                 "button:has-text('Akzeptieren')",
                 "button:has-text('Alle akzeptieren')",
@@ -141,58 +108,50 @@ def check_offers():
                 try:
                     if page.is_visible(selector, timeout=2000):
                         page.click(selector)
-                        print(f"🍪 Çerez onayına tıklandı: {selector}")
                         time.sleep(2)
                         break
                 except Exception:
                     pass
 
-            # Sayfayı aşağı kaydır
-            page.mouse.wheel(0, 1000)
+            page.mouse.wheel(0, 1200)
             time.sleep(3)
 
             body_text = page.inner_text("body")
-            print(f"📄 Sayfa metni çekildi. Karakter sayısı: {len(body_text)}")
-
+            lines = [line.strip() for line in body_text.splitlines() if line.strip()]
+            
             seen_hashes = load_seen_hashes()
             new_offers = []
             new_hashes = set()
 
-            for line in body_text.splitlines():
-                clean_line = line.strip()
-                # Kelimelerden herhangi biri geçiyor mu ve satır anlamlı bir uzunlukta mı?
-                if (
-                    any(kw in clean_line.lower() for kw in KEYWORDS)
-                    and len(clean_line) > 8
-                ):
-                    # Rakamları temizleyip sadece mekan/ilan kimliğini hash'le
-                    normalized = normalize_line_for_hash(clean_line)
-                    offer_hash = hashlib.md5(
-                        normalized.encode("utf-8")
-                    ).hexdigest()
+            for i, line in enumerate(lines):
+                lower_line = line.lower()
+                if any(kw in lower_line for kw in KEYWORDS) and len(line) > 5:
+                    # İlan başlığının hemen üstündeki adres satırını da (varsa) yakala
+                    # Görseldeki yapı: Üstte "Iserlohn, Steubenstraße, 14-18", altta başlık var.
+                    address_line = lines[i - 1] if i > 0 and len(lines[i - 1]) < 60 else ""
+                    
+                    # Tekrar kontrolü için adres + başlık birleşimini kullan
+                    full_offer_id = f"{address_line} | {line}" if address_line else line
+                    offer_hash = hashlib.md5(normalize_for_hash(full_offer_id).encode("utf-8")).hexdigest()
 
-                    if offer_hash not in seen_hashes:
-                        new_offers.append(clean_line)
+                    if offer_hash not in seen_hashes and offer_hash not in new_hashes:
+                        display_text = f"📍 {address_line}\n🏠 {line}" if address_line else f"🏠 {line}"
+                        new_offers.append(display_text)
                         new_hashes.add(offer_hash)
 
             if new_offers:
-                print(
-                    f"🔥 {len(new_offers)} Adet YENİ İlan (Einzel/WG) Bulundu!"
-                )
-
-                msg = f"🏠 YENİ İLAN BULUNDU!\n\n"
-                msg += "\n• ".join(new_offers[:8])
-                msg += f"\n\n🔗 Link: {URL}"
-
+                print(f"🔥 {len(new_offers)} adet yeni ilan tespit edildi!")
+                msg = "🚨 YENİ YURT İLANI BULUNDU!\n\n"
+                msg += "\n\n".join(new_offers[:6])
+                msg += f"\n\n🔗 Başvuru Linki: {URL}"
+                
                 notify(msg)
                 save_seen_hashes(new_hashes)
             else:
-                print(
-                    "ℹ️ Yeni lokasyon/ilan yok. Sitedeki mevcut ilanlar (kontenjan değişmiş olsa bile) önceden bildirildi."
-                )
+                print("ℹ️ Yeni ilan bulunamadı, mevcut ilanlar zaten önbellekte kayıtlı.")
 
         except Exception as e:
-            print("Tarama hatası oluştu:", e)
+            print("❌ Tarama hatası:", e)
         finally:
             browser.close()
 
