@@ -11,11 +11,10 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 CACHE_FILE = "seen_offers.txt"
 
-# Yakalanacak ilan tipleri (Tekli daireler ve 2'li, 3'lü, 5'li vb. WG odaları)
 KEYWORDS = [
     "einzelapartment",
     "einzelapartments",
-    "er-wg",          # 2er-WG, 3er-WG, 5er-WG gibi tüm varyasyonları yakalar
+    "er-wg",
     "wg-zimmer",
     "wohngemeinschaft",
     "dublette"
@@ -52,27 +51,18 @@ def save_seen_hashes(hashes):
 
 
 def normalize_for_hash(text):
-    """
-    Rakamları ve boş oda sayılarını temizler.
-    Örn: '8 verfügbare Einzelapartments' -> 'verfügbare einzelapartments'
-    Örn: 'Zimmer in 3er-WG' -> 'zimmer in er-wg'
-    Böylece kontenjan 8'den 7'ye düşse bile aynı yurt/tip için tekrar bildirim atmaz.
-    """
     clean = re.sub(r"\d+", "", text.lower())
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean
 
 
 def check_offers():
-    # 1. İlk başlatma / Önbellek silinmişse bildirim gönder
     is_first_run = not os.path.exists(CACHE_FILE)
     if is_first_run:
         print("🚀 İlk çalıştırma veya önbellek temizlendi. Başlangıç mesajı atılıyor...")
         notify("🤖 Bot başlatıldı ve hafıza sıfırlandı! İlan takibi aktif.")
-        # Dosyayı hemen oluştur ki bir sonraki çalışmada tekrar başlatıldı mesajı atmasın
         open(CACHE_FILE, "w", encoding="utf-8").close()
 
-    # 2. Bot tespitini önlemek için 0 - 180 saniye arası rastgele bekleme
     wait_seconds = random.randint(0, 180)
     print(f"🎲 Tarama öncesi {wait_seconds} saniye rastgele bekleniyor...")
     time.sleep(wait_seconds)
@@ -86,58 +76,82 @@ def check_offers():
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             locale="de-DE",
-            viewport={"width": 1280, "height": 800},
+            viewport={"width": 1280, "height": 1000},
         )
         page = context.new_page()
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         try:
             print("🔎 Sayfa yükleniyor...")
-            page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(5)
+            page.goto(URL, wait_until="networkidle", timeout=60000)
+            time.sleep(4)
 
-            # Çerez onay penceresini geç
+            # Çerez onay penceresini geç (Usercentrics veya standart butonlar)
             cookie_selectors = [
-                "button:has-text('Akzeptieren')",
                 "button:has-text('Alle akzeptieren')",
-                "button:has-text('Ich stimme zu')",
-                ".cookie-consent-accept",
+                "button:has-text('Akzeptieren')",
+                "button:has-text('Zustimmen')",
+                "[data-testid='uc-accept-all-button']",
                 "#uc-btn-accept-banner",
             ]
             for selector in cookie_selectors:
                 try:
-                    if page.is_visible(selector, timeout=2000):
-                        page.click(selector)
-                        time.sleep(2)
+                    btn = page.locator(selector).first
+                    if btn.is_visible(timeout=2000):
+                        btn.click()
+                        print(f"🍪 Çerez onaylandı: {selector}")
+                        time.sleep(3)
                         break
                 except Exception:
                     pass
 
-            page.mouse.wheel(0, 1200)
+            # Sayfanın tamamının yüklenmesi için aşağı kaydır
+            page.mouse.wheel(0, 1500)
             time.sleep(3)
 
             body_text = page.inner_text("body")
-            lines = [line.strip() for line in body_text.splitlines() if line.strip()]
-            
+            print(f"📄 Çekilen toplam karakter sayısı: {len(body_text)}")
+
             seen_hashes = load_seen_hashes()
             new_offers = []
             new_hashes = set()
 
-            for i, line in enumerate(lines):
-                lower_line = line.lower()
-                if any(kw in lower_line for kw in KEYWORDS) and len(line) > 5:
-                    # İlan başlığının hemen üstündeki adres satırını da (varsa) yakala
-                    # Görseldeki yapı: Üstte "Iserlohn, Steubenstraße, 14-18", altta başlık var.
-                    address_line = lines[i - 1] if i > 0 and len(lines[i - 1]) < 60 else ""
+            # Başlık elementlerini (h2, h3, h4) doğrudan tara (Satır bölünmelerini önler)
+            headings = page.locator("h2, h3, h4").all()
+            for heading in headings:
+                title = " ".join(heading.inner_text().split())
+                if any(kw in title.lower() for kw in KEYWORDS) and len(title) > 5:
+                    # Başlığın bulunduğu kart kapsayıcısındaki tüm metni al (adres dahil)
+                    card_text = heading.locator("xpath=..").inner_text()
+                    card_lines = [l.strip() for l in card_text.splitlines() if l.strip()]
                     
-                    # Tekrar kontrolü için adres + başlık birleşimini kullan
-                    full_offer_id = f"{address_line} | {line}" if address_line else line
+                    # Başlık dışındaki ilk anlamlı satırı adres olarak al
+                    address = ""
+                    for l in card_lines:
+                        if l != title and "mehr informationen" not in l.lower() and "€" not in l and "m²" not in l:
+                            address = l
+                            break
+
+                    full_offer_id = f"{address} | {title}" if address else title
                     offer_hash = hashlib.md5(normalize_for_hash(full_offer_id).encode("utf-8")).hexdigest()
 
                     if offer_hash not in seen_hashes and offer_hash not in new_hashes:
-                        display_text = f"📍 {address_line}\n🏠 {line}" if address_line else f"🏠 {line}"
+                        display_text = f"📍 {address}\n🏠 {title}" if address else f"🏠 {title}"
                         new_offers.append(display_text)
                         new_hashes.add(offer_hash)
+
+            # Yedek kontrol: Eğer başlık etiketlerinden yakalanamadıysa birleştirilmiş metinde ara
+            if not new_offers and not new_hashes:
+                lines = [l.strip() for l in body_text.splitlines() if l.strip()]
+                for i, line in enumerate(lines):
+                    # Mevcut satır + bir sonraki satırı birleştirerek bölünmüş başlıkları yakala
+                    combined = f"{line} {lines[i+1]}" if i + 1 < len(lines) else line
+                    if any(kw in combined.lower() for kw in KEYWORDS):
+                        target = line if any(kw in line.lower() for kw in KEYWORDS) else combined
+                        offer_hash = hashlib.md5(normalize_for_hash(target).encode("utf-8")).hexdigest()
+                        if offer_hash not in seen_hashes and offer_hash not in new_hashes:
+                            new_offers.append(f"🏠 {target}")
+                            new_hashes.add(offer_hash)
 
             if new_offers:
                 print(f"🔥 {len(new_offers)} adet yeni ilan tespit edildi!")
@@ -148,7 +162,7 @@ def check_offers():
                 notify(msg)
                 save_seen_hashes(new_hashes)
             else:
-                print("ℹ️ Yeni ilan bulunamadı, mevcut ilanlar zaten önbellekte kayıtlı.")
+                print("ℹ️ Yeni ilan bulunamadı veya mevcut ilanlar zaten önbellekte kayıtlı.")
 
         except Exception as e:
             print("❌ Tarama hatası:", e)
