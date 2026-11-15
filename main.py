@@ -56,6 +56,43 @@ def normalize_for_hash(text):
     return clean
 
 
+def accept_cookies(page):
+    """Standart ve Shadow DOM (Usercentrics) içindeki çerez onay butonlarını geçer."""
+    # 1. Yöntem: Playwright Role & Text Locator (Shadow DOM'u otomatik deler)
+    button_names = [
+        re.compile(r"alle akzeptieren", re.I),
+        re.compile(r"akzeptieren", re.I),
+        re.compile(r"zustimmen", re.I),
+        re.compile(r"accept all", re.I),
+    ]
+    for name in button_names:
+        try:
+            btn = page.get_by_role("button", name=name).first
+            if btn.is_visible(timeout=2000):
+                btn.click()
+                print(f"🍪 Çerez butonu tıklandı: {name.pattern}")
+                time.sleep(3)
+                return
+        except Exception:
+            pass
+
+    # 2. Yöntem: JavaScript ile Shadow DOM (Usercentrics) doğrudan tıklaması
+    try:
+        clicked = page.evaluate("""() => {
+            const uc = document.querySelector('#usercentrics-root');
+            if (uc && uc.shadowRoot) {
+                const btn = uc.shadowRoot.querySelector('[data-testid="uc-accept-all-button"]');
+                if (btn) { btn.click(); return true; }
+            }
+            return false;
+        }""")
+        if clicked:
+            print("🍪 Shadow DOM (Usercentrics) çerez onayı geçildi.")
+            time.sleep(3)
+    except Exception:
+        pass
+
+
 def check_offers():
     is_first_run = not os.path.exists(CACHE_FILE)
     if is_first_run:
@@ -71,61 +108,52 @@ def check_offers():
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage"
+            ],
         )
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             locale="de-DE",
-            viewport={"width": 1280, "height": 1000},
+            timezone_id="Europe/Berlin",
+            viewport={"width": 1366, "height": 900},
         )
         page = context.new_page()
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         try:
             print("🔎 Sayfa yükleniyor...")
-            page.goto(URL, wait_until="networkidle", timeout=60000)
-            time.sleep(4)
+            page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+            time.sleep(5)
 
-            # Çerez onay penceresini geç (Usercentrics veya standart butonlar)
-            cookie_selectors = [
-                "button:has-text('Alle akzeptieren')",
-                "button:has-text('Akzeptieren')",
-                "button:has-text('Zustimmen')",
-                "[data-testid='uc-accept-all-button']",
-                "#uc-btn-accept-banner",
-            ]
-            for selector in cookie_selectors:
-                try:
-                    btn = page.locator(selector).first
-                    if btn.is_visible(timeout=2000):
-                        btn.click()
-                        print(f"🍪 Çerez onaylandı: {selector}")
-                        time.sleep(3)
-                        break
-                except Exception:
-                    pass
+            # Çerez onay penceresini geç
+            accept_cookies(page)
 
-            # Sayfanın tamamının yüklenmesi için aşağı kaydır
+            # İçeriğin tam oturması için bekle ve aşağı kaydır
             page.mouse.wheel(0, 1500)
-            time.sleep(3)
+            time.sleep(4)
 
             body_text = page.inner_text("body")
             print(f"📄 Çekilen toplam karakter sayısı: {len(body_text)}")
+
+            # Eğer karakter sayısı hala 1000'in altındaysa engelleme/bekleme metnini loga yazdır
+            if len(body_text) < 1000:
+                print("⚠️ Sayfa içeriği kısa döndü. Ekrandaki metin özeti:")
+                print(body_text[:400])
 
             seen_hashes = load_seen_hashes()
             new_offers = []
             new_hashes = set()
 
-            # Başlık elementlerini (h2, h3, h4) doğrudan tara (Satır bölünmelerini önler)
             headings = page.locator("h2, h3, h4").all()
             for heading in headings:
                 title = " ".join(heading.inner_text().split())
                 if any(kw in title.lower() for kw in KEYWORDS) and len(title) > 5:
-                    # Başlığın bulunduğu kart kapsayıcısındaki tüm metni al (adres dahil)
                     card_text = heading.locator("xpath=..").inner_text()
                     card_lines = [l.strip() for l in card_text.splitlines() if l.strip()]
                     
-                    # Başlık dışındaki ilk anlamlı satırı adres olarak al
                     address = ""
                     for l in card_lines:
                         if l != title and "mehr informationen" not in l.lower() and "€" not in l and "m²" not in l:
@@ -140,11 +168,9 @@ def check_offers():
                         new_offers.append(display_text)
                         new_hashes.add(offer_hash)
 
-            # Yedek kontrol: Eğer başlık etiketlerinden yakalanamadıysa birleştirilmiş metinde ara
             if not new_offers and not new_hashes:
                 lines = [l.strip() for l in body_text.splitlines() if l.strip()]
                 for i, line in enumerate(lines):
-                    # Mevcut satır + bir sonraki satırı birleştirerek bölünmüş başlıkları yakala
                     combined = f"{line} {lines[i+1]}" if i + 1 < len(lines) else line
                     if any(kw in combined.lower() for kw in KEYWORDS):
                         target = line if any(kw in line.lower() for kw in KEYWORDS) else combined
