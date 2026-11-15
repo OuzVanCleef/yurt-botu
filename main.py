@@ -90,12 +90,11 @@ def accept_cookies(page):
 
 
 def pass_mosparo_spam_protection(page):
-    """Mosparo spam koruma kutusunu işaretler ve yönlendirmeyi bekler."""
+    """Mosparo spam koruma kutusunu işaretler ve asıl sayfa yüklenene kadar bekler."""
     body_text = page.inner_text("body")
     if "spamschutz" in body_text.lower() or "ich akzeptiere" in body_text.lower():
         print("🛡️ Mosparo spam koruması tespit edildi, onay veriliyor...")
         try:
-            # 1. 'Ich akzeptiere' etiketine veya checkbox'a tıkla
             checkbox_label = page.locator("text=/Ich akzeptiere/i").first
             if checkbox_label.is_visible(timeout=3000):
                 checkbox_label.click(force=True)
@@ -105,16 +104,16 @@ def pass_mosparo_spam_protection(page):
                 cb.click(force=True)
                 print("✅ Checkbox işaretlendi.")
 
-            # 2. Doğrulama tamamlanıp sayfa yönlendirilene kadar bekle (maks. 20 sn)
             print("⏳ Spam doğrulaması ve yönlendirme bekleniyor...")
             for _ in range(20):
                 time.sleep(1)
                 current_text = page.inner_text("body").lower()
-                if "spamschutz" not in current_text and len(current_text) > 1000:
+                # Artık 'spamschutz' metni kalktıysa ve asıl sayfa başlığı geldiyse geçilmiş demektir
+                if "spamschutz" not in current_text and "freie zimmer" in current_text:
                     print("🔓 Spam koruması başarıyla geçildi, ilan sayfası yüklendi!")
                     time.sleep(2)
                     return True
-            print("⚠️ Yönlendirme süresi doldu, sayfa tekrar kontrol ediliyor...")
+            print("⚠️ Yönlendirme kontrol süresi tamamlandı, sayfa taranıyor...")
         except Exception as e:
             print(f"❌ Spam koruması tıklama hatası: {e}")
     return False
@@ -155,22 +154,18 @@ def check_offers():
             page.goto(URL, wait_until="domcontentloaded", timeout=60000)
             time.sleep(4)
 
-            # Çerezleri kabul et
             accept_cookies(page)
-
-            # Mosparo spam korumasını geç ve yönlendirmeyi bekle
             pass_mosparo_spam_protection(page)
 
-            # Sayfanın tamamını yüklemek için kaydır
             page.mouse.wheel(0, 1500)
             time.sleep(3)
 
             body_text = page.inner_text("body")
             print(f"📄 Çekilen toplam karakter sayısı: {len(body_text)}")
 
-            if len(body_text) < 1000:
-                print("⚠️ Uyarı: Sayfa hala spam ekranında veya boş olabilir:")
-                print(body_text[:400])
+            # Hala spam ekranındaysak dur, ama asıl sayfadaysak karakter sayısına bakmadan devam et
+            if "spamschutz" in body_text.lower() or "ich akzeptiere" in body_text.lower():
+                print("⚠️ Hala spam ekranında takılı kaldı, çıkılıyor.")
                 return
 
             seen_hashes = load_seen_hashes()
