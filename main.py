@@ -1,6 +1,5 @@
 import hashlib
 import os
-import random
 import re
 import time
 import requests
@@ -108,7 +107,6 @@ def pass_mosparo_spam_protection(page):
             for _ in range(20):
                 time.sleep(1)
                 current_text = page.inner_text("body").lower()
-                # Artık 'spamschutz' metni kalktıysa ve asıl sayfa başlığı geldiyse geçilmiş demektir
                 if "spamschutz" not in current_text and "freie zimmer" in current_text:
                     print("🔓 Spam koruması başarıyla geçildi, ilan sayfası yüklendi!")
                     time.sleep(2)
@@ -125,10 +123,6 @@ def check_offers():
         print("🚀 İlk çalıştırma veya önbellek temizlendi. Başlangıç mesajı atılıyor...")
         notify("🤖 Bot başlatıldı ve hafıza sıfırlandı! İlan takibi aktif.")
         open(CACHE_FILE, "w", encoding="utf-8").close()
-
-    wait_seconds = random.randint(0, 180)
-    print(f"🎲 Tarama öncesi {wait_seconds} saniye rastgele bekleniyor...")
-    time.sleep(wait_seconds)
 
     print("🌐 Tarayıcı başlatılıyor...")
     with sync_playwright() as p:
@@ -163,7 +157,6 @@ def check_offers():
             body_text = page.inner_text("body")
             print(f"📄 Çekilen toplam karakter sayısı: {len(body_text)}")
 
-            # Hala spam ekranındaysak dur, ama asıl sayfadaysak karakter sayısına bakmadan devam et
             if "spamschutz" in body_text.lower() or "ich akzeptiere" in body_text.lower():
                 print("⚠️ Hala spam ekranında takılı kaldı, çıkılıyor.")
                 return
