@@ -43,9 +43,10 @@ def load_seen_hashes():
     return set()
 
 
-def save_seen_hashes(hashes):
-    with open(CACHE_FILE, "a", encoding="utf-8") as f:
-        for h in hashes:
+def update_active_hashes(active_hashes):
+    """Sadece o an sitede aktif olan ilanları kaydeder; kalkan ilanlar listeden düşer."""
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        for h in active_hashes:
             f.write(f"{h}\n")
 
 
@@ -157,13 +158,14 @@ def check_offers():
             body_text = page.inner_text("body")
             print(f"📄 Çekilen toplam karakter sayısı: {len(body_text)}")
 
-            if "spamschutz" in body_text.lower() or "ich akzeptiere" in body_text.lower():
-                print("⚠️ Hala spam ekranında takılı kaldı, çıkılıyor.")
+            # Sayfa yüklenemediyse veya spam ekranında kaldıysa mevcut önbelleği silmemek için çık
+            if "spamschutz" in body_text.lower() or "ich akzeptiere" in body_text.lower() or "freie zimmer" not in body_text.lower():
+                print("⚠️ Sayfa tam yüklenemedi veya spam ekranında kaldı, önbellek korunuyor.")
                 return
 
-            seen_hashes = load_seen_hashes()
+            previous_hashes = load_seen_hashes()
+            current_active_hashes = set()
             new_offers = []
-            new_hashes = set()
 
             headings = page.locator("h2, h3, h4").all()
             for heading in headings:
@@ -181,32 +183,35 @@ def check_offers():
                     full_offer_id = f"{address} | {title}" if address else title
                     offer_hash = hashlib.md5(normalize_for_hash(full_offer_id).encode("utf-8")).hexdigest()
 
-                    if offer_hash not in seen_hashes and offer_hash not in new_hashes:
-                        display_text = f"📍 {address}\n🏠 {title}" if address else f"🏠 {title}"
-                        new_offers.append(display_text)
-                        new_hashes.add(offer_hash)
+                    if offer_hash not in current_active_hashes:
+                        current_active_hashes.add(offer_hash)
+                        if offer_hash not in previous_hashes:
+                            display_text = f"📍 {address}\n🏠 {title}" if address else f"🏠 {title}"
+                            new_offers.append(display_text)
 
-            if not new_offers and not new_hashes:
+            if not current_active_hashes:
                 lines = [l.strip() for l in body_text.splitlines() if l.strip()]
                 for i, line in enumerate(lines):
                     combined = f"{line} {lines[i+1]}" if i + 1 < len(lines) else line
                     if any(kw in combined.lower() for kw in KEYWORDS):
                         target = line if any(kw in line.lower() for kw in KEYWORDS) else combined
                         offer_hash = hashlib.md5(normalize_for_hash(target).encode("utf-8")).hexdigest()
-                        if offer_hash not in seen_hashes and offer_hash not in new_hashes:
-                            new_offers.append(f"🏠 {target}")
-                            new_hashes.add(offer_hash)
+                        if offer_hash not in current_active_hashes:
+                            current_active_hashes.add(offer_hash)
+                            if offer_hash not in previous_hashes:
+                                new_offers.append(f"🏠 {target}")
 
             if new_offers:
                 print(f"🔥 {len(new_offers)} adet yeni ilan tespit edildi!")
                 msg = "🚨 YENİ YURT İLANI BULUNDU!\n\n"
                 msg += "\n\n".join(new_offers[:6])
                 msg += f"\n\n🔗 Başvuru Linki: {URL}"
-                
                 notify(msg)
-                save_seen_hashes(new_hashes)
             else:
-                print("ℹ️ Yeni ilan bulunamadı veya mevcut ilanlar zaten önbellekte kayıtlı.")
+                print("ℹ️ Yeni ilan bulunamadı, mevcut ilanlar zaten önbellekte kayıtlı.")
+
+            # Önbelleği sadece o an sitede aktif olan ilanlarla güncelle (kalkan ilanlar silinir)
+            update_active_hashes(current_active_hashes)
 
         except Exception as e:
             print("❌ Tarama hatası:", e)
